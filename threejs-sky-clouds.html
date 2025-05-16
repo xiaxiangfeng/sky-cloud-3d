@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>Three.js Sky and Clouds</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1">
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+        #info {
+            position: fixed;
+            top: 10px;
+            width: 100%;
+            text-align: center;
+            color: white;
+            font-family: Arial, sans-serif;
+            text-shadow: 1px 1px 2px black;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">Three.js Sky and Cloud Rendering</div>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+
+        let scene, camera, renderer, controls, gui;
+        let skyMaterial, skyMesh;
+        let clock = new THREE.Clock();
+        let perlinNoiseTexture;
+
+        // For sun animation
+        let sunAngle = 0;
+        let sunDirection = new THREE.Vector3();
+        let elapsedTime = 0;
+        
+        // Configurable parameters
+        const params = {
+            cloudCoverage: 0.65,
+            cloudHeight: 600.0,
+            cloudThickness: 45.0,
+            cloudAbsorption: 1.030725,
+            windSpeedX: 5.0,
+            windSpeedZ: 3.0,
+            sunSpeed: 0.035,
+            exposure: 0.7,
+            maxCloudDistance: 10000.0
+        };
+
+        function init() {
+            // Scene
+            scene = new THREE.Scene();
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 30000);
+            camera.position.set(0, 100, 400);
+            camera.lookAt(0, 100, 0);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 0.7;
+            renderer.outputEncoding = THREE.sRGBEncoding;
+            document.body.appendChild(renderer.domElement);
+
+            // Controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false;
+            controls.minDistance = 10;
+            controls.maxDistance = 2000;
+            controls.maxPolarAngle = Math.PI * 0.48; // Limit to look mostly upward
+            controls.minPolarAngle = 0.1; // Prevent looking completely down
+            controls.autoRotate = false;
+            controls.autoRotateSpeed = 0.5;
+
+            // Grid Helper
+            const gridSize = 2000;
+            const gridDivisions = 40;
+            const gridHelper = new THREE.GridHelper(gridSize, gridDivisions, 0x888888, 0x444444);
+            scene.add(gridHelper);
+
+            // Ground Plane
+            const groundGeometry = new THREE.PlaneGeometry(gridSize, gridSize);
+            const groundMaterial = new THREE.MeshBasicMaterial({ 
+                color: 0x223322, 
+                transparent: true, 
+                opacity: 0.3,
+                side: THREE.DoubleSide
+            });
+            const groundPlane = new THREE.Mesh(groundGeometry, groundMaterial);
+            groundPlane.rotation.x = -Math.PI / 2;
+            groundPlane.position.y = -0.1; // Just below the grid
+            scene.add(groundPlane);
+            
+            // Texture Loader
+            const textureLoader = new THREE.TextureLoader();
+            
+            // Perlin Noise Texture - crucial for cloud generation
+            perlinNoiseTexture = textureLoader.load(
+                'textures/perlin256.png',
+                (texture) => {
+                    texture.wrapS = THREE.RepeatWrapping;
+                    texture.wrapT = THREE.RepeatWrapping;
+                    texture.flipY = false;
+                    texture.minFilter = THREE.LinearFilter;
+                    texture.magFilter = THREE.LinearFilter;
+                    texture.generateMipmaps = false;
+                    
+                    // Now that texture is loaded, update the shader
+                    if (skyMaterial) {
+                        skyMaterial.uniforms.t_PerlinNoise.value = texture;
+                        skyMaterial.needsUpdate = true;
+                    }
+                    console.log("Perlin noise texture loaded successfully.");
+                },
+                undefined,
+                (err) => {
+                    console.error('Error loading Perlin noise texture:', err);
+                    // Create fallback texture - a simple noise pattern
+                    if (skyMaterial) {
+                        const fallbackSize = 256;
+                        const data = new Uint8Array(fallbackSize * fallbackSize * 4);
+                        for (let i = 0; i < fallbackSize * fallbackSize * 4; i += 4) {
+                            const val = Math.random() * 255;
+                            data[i] = val;
+                            data[i+1] = val;
+                            data[i+2] = val;
+                            data[i+3] = 255;
+                        }
+                        const fallbackTex = new THREE.DataTexture(
+                            data, fallbackSize, fallbackSize, THREE.RGBAFormat
+                        );
+                        fallbackTex.needsUpdate = true;
+                        skyMaterial.uniforms.t_PerlinNoise.value = fallbackTex;
+                    }
+                }
+            );
+            
+            // Sky Shader implementation based on the original fragment shader
+            const skyVertexShader = `
+                varying vec3 vWorldPosition;
+                varying vec2 vUv;
+                
+                void main() {
+                    vUv = uv;
+                    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+                    vWorldPosition = worldPosition.xyz;
+                    gl_Position = projectionMatrix * viewMatrix * worldPosition;
+                }
+            `;
+
+            const skyFragmentShader = `
+                precision highp float;
+                precision highp int;
+
+                uniform float uTime;
+                uniform vec3 uSunDirection;
+                uniform sampler2D t_PerlinNoise;
+                uniform vec2 uResolution;
+                uniform float uCloudCoverage;
+                uniform float uCloudHeight;
+                uniform float uCloudThickness;
+                uniform float uCloudAbsorption;
+                uniform float uWindSpeedX;
+                uniform float uWindSpeedZ;
+                uniform float uMaxCloudDistance;
+
+                varying vec3 vWorldPosition;
+                varying vec2 vUv;
+
+                // Constants inspired by the ShaderToy code
+                #define TWO_PI 6.28318530718
+                #define STEPS          22
+                #define LIGHT_STEPS    5
+
+                // Sky model functions
+                vec3 Get_Sky_Color(vec3 rayDir) {
+                    // Calculate sky gradient based on ray direction
+                    float sunAmount = max(0.0, dot(rayDir, uSunDirection));
+                    float skyGradient = pow(max(0.0, rayDir.y), 0.5);
+                    
+                    // Create sky color with sun influence - more muted blue
+                    vec3 skyColor = mix(
+                        vec3(0.1, 0.2, 0.4), // Deeper, less bright blue
+                        vec3(0.8, 0.7, 0.5), // Softer sun color
+                        pow(sunAmount, 12.0) // Smaller sun influence
+                    );
+                    
+                    // Add horizon effect
+                    vec3 horizonColor = vec3(0.7, 0.75, 0.8); // Less bright horizon
+                    skyColor = mix(horizonColor, skyColor, skyGradient);
+                    
+                    // Intensify sun disk
+                    if (sunAmount > 0.999) {
+                        skyColor += vec3(1.0, 0.7, 0.3) * pow(sunAmount, 1000.0) * 3.0; // Less intense sun
+                    }
+                    
+                    return skyColor;
+                }
+
+                // Improved noise functions for cloud generation
+                float noise3D(in vec3 p) {
+                    vec2 uv = p.xz * 0.01;
+                    return texture(t_PerlinNoise, uv).x;
+                }
+
+                const mat3 m = 1.21 * mat3(0.00, 0.80, 0.60,
+                                          -0.80, 0.36, -0.48,
+                                          -0.60, -0.48, 0.64);
+
+                float fbm(vec3 p) {
+                    float t;
+                    float mult = 2.76434; // From ShaderToy FBM_FREQ
+                    t  = 0.51749673 * noise3D(p); p = m * p * mult;
+                    t += 0.25584929 * noise3D(p); p = m * p * mult;
+                    t += 0.12527603 * noise3D(p); p = m * p * mult;
+                    t += 0.06255931 * noise3D(p);
+                    return t;
+                }
+
+                float cloud_density(vec3 pos, vec3 offset, float h) {
+                    // Use the structure from the ShaderToy code for density
+                    vec3 p = pos * 0.0212242 + offset;
+                    float dens = fbm(p);
+                    
+                    float cov = 1.0 - uCloudCoverage;
+                    dens *= smoothstep(cov, cov + 0.05, dens);
+                    
+                    // Height-based attenuation
+                    float height = pos.y - uCloudHeight;
+                    float heightAttenuation = 1.0 - clamp(height / uCloudThickness, 0.0, 1.0);
+                    heightAttenuation = heightAttenuation * heightAttenuation;
+                    dens *= heightAttenuation;
+                    
+                    return clamp(dens, 0.0, 1.0);
+                }
+
+                float cloud_light(vec3 pos, vec3 dir_step, vec3 offset, float cov) {
+                    float T = 1.0; // transmittance
+                    
+                    for (int i = 0; i < LIGHT_STEPS; i++) {
+                        float dens = cloud_density(pos, offset, 0.0);
+                        float T_i = exp(-uCloudAbsorption * dens);
+                        T *= T_i;
+                        pos += dir_step;
+                    }
+                    return T;
+                }
+
+                vec4 render_clouds(vec3 rayOrigin, vec3 rayDirection) {
+                    // Check for ray-plane intersection with cloud layer
+                    float t = (uCloudHeight - rayOrigin.y) / rayDirection.y;
+                    if (t < 0.0) return vec4(0.0); // Ray doesn't hit cloud layer
+                    
+                    // Early exit if clouds are beyond maximum view distance
+                    if (t > uMaxCloudDistance) return vec4(0.0);
+                    
+                    // Calculate distance fade factor
+                    float distanceFade = 1.0 - smoothstep(uMaxCloudDistance * 0.6, uMaxCloudDistance, t);
+                    
+                    // Start position at cloud base
+                    vec3 startPos = rayOrigin + rayDirection * t;
+                    
+                    // Animation based on time - winds blowing clouds with different speed factors from ShaderToy
+                    vec3 windOffset = vec3(uTime * -uWindSpeedX, 0.0, uTime * -uWindSpeedZ);
+                    vec3 pos = startPos;
+                    
+                    float march_step = uCloudThickness / float(STEPS);
+                    vec3 dir_step = rayDirection * march_step;
+                    vec3 light_step = uSunDirection * 5.0;
+                    
+                    // Dynamic cloud coverage with slower variation
+                    float covAmount = (sin(mod(uTime * 0.02, TWO_PI))) * 0.1 + 0.5;
+                    float coverage = mix(0.4, 0.6, clamp(covAmount, 0.0, 1.0));
+                    
+                    float T = 1.0; // transmittance
+                    vec3 C = vec3(0); // color
+                    float alpha = 0.0;
+                    
+                    // Ray marching through cloud volume
+                    for (int i = 0; i < STEPS; i++) {
+                        // Skip if we're below cloud base or above cloud top
+                        if (pos.y < uCloudHeight || pos.y > uCloudHeight + uCloudThickness) {
+                            pos += dir_step;
+                            continue;
+                        }
+                        
+                        float h = float(i) / float(STEPS);
+                        float dens = cloud_density(pos, windOffset, h);
+                        
+                        if (dens > 0.01) {
+                            float T_i = exp(-uCloudAbsorption * dens * march_step);
+                            T *= T_i;
+                            
+                            // Calculate lighting using the approach from ShaderToy
+                            float cloudLight = cloud_light(pos, light_step, windOffset, coverage);
+                            
+                            // Simulating the light effect from ShaderToy
+                            float lightFactor = (exp(h) / 1.75);
+                            
+                            // Silver lining effect
+                            float sunContribution = pow(max(0.0, dot(rayDirection, uSunDirection)), 2.0);
+                            vec3 edgeColor = mix(vec3(1.0), vec3(1.0, 0.8, 0.5), sunContribution);
+                            
+                            // Accumulate color
+                            vec3 cloudColor = mix(
+                                vec3(0.15, 0.15, 0.2), // Darker shadow color
+                                edgeColor,              // Lit edge color
+                                cloudLight * lightFactor
+                            );
+                            
+                            C += T * cloudColor * dens * march_step * 1.5;
+                            alpha += (1.0 - T_i) * (1.0 - alpha);
+                        }
+                        
+                        pos += dir_step;
+                        if (T < 0.01) break; // Early exit for performance
+                    }
+                    
+                    // Apply sunlight coloring to clouds - more subtle than before
+                    vec3 sunColor = vec3(0.9, 0.7, 0.5);
+                    vec3 skyColor = vec3(0.4, 0.5, 0.6);
+                    C = C * mix(skyColor, sunColor, 0.5 * pow(max(0.0, dot(rayDirection, uSunDirection)), 2.0));
+                    
+                    // Apply distance fade for smooth transition at distance limits
+                    alpha *= distanceFade;
+                    C *= distanceFade;
+                    
+                    return vec4(C, alpha);
+                }
+
+                void main() {
+                    vec3 rayDirection = normalize(vWorldPosition - cameraPosition);
+                    
+                    // Calculate the sky color
+                    vec3 skyColor = Get_Sky_Color(rayDirection);
+                    
+                    // Render clouds with more attention to vertical rays
+                    vec4 clouds = vec4(0.0);
+                    if (rayDirection.y > 0.0) {
+                        clouds = render_clouds(cameraPosition, rayDirection);
+                    }
+                    
+                    // Mix sky and clouds with proper lighting - lower overall brightness
+                    vec3 finalColor = mix(skyColor, clouds.rgb, clouds.a);
+                    
+                    // Apply atmosphere effect (aerial perspective)
+                    // This gives a slight haziness to the horizon
+                    float t = pow(1.0 - max(0.0, rayDirection.y), 5.0);
+                    finalColor = mix(finalColor, vec3(0.65, 0.7, 0.75), 0.5 * t);
+                    
+                    // Tone mapping to control overall brightness
+                    finalColor = finalColor / (finalColor + vec3(1.0)); // Simple Reinhard tone mapping
+                    
+                    gl_FragColor = vec4(finalColor, 1.0);
+                }
+            `;
+            
+            // Create sky material with the shaders and uniforms
+            skyMaterial = new THREE.ShaderMaterial({
+                vertexShader: skyVertexShader,
+                fragmentShader: skyFragmentShader,
+                uniforms: {
+                    uTime: { value: 0.0 },
+                    uSunDirection: { value: new THREE.Vector3(0.5, 0.5, -0.5).normalize() },
+                    t_PerlinNoise: { value: null }, // Will be set when texture loads
+                    uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+                    uCloudCoverage: { value: params.cloudCoverage },
+                    uCloudHeight: { value: params.cloudHeight },
+                    uCloudThickness: { value: params.cloudThickness },
+                    uCloudAbsorption: { value: params.cloudAbsorption },
+                    uWindSpeedX: { value: params.windSpeedX },
+                    uWindSpeedZ: { value: params.windSpeedZ },
+                    uMaxCloudDistance: { value: params.maxCloudDistance }
+                },
+                side: THREE.BackSide,
+            });
+
+            // Create a placeholder texture until the real one loads
+            const placeholderData = new Uint8Array([128, 128, 128, 255]);
+            const placeholderTexture = new THREE.DataTexture(placeholderData, 1, 1, THREE.RGBAFormat);
+            placeholderTexture.needsUpdate = true;
+            skyMaterial.uniforms.t_PerlinNoise.value = placeholderTexture;
+
+            // Sky Dome - large sphere surrounding the scene
+            const skyGeometry = new THREE.SphereGeometry(20000, 64, 32); 
+            skyMesh = new THREE.Mesh(skyGeometry, skyMaterial);
+            scene.add(skyMesh);
+
+            // Add GUI controls
+            setupGUI();
+
+            // Handle window resize
+            window.addEventListener('resize', onWindowResize, false);
+        }
+        
+        function setupGUI() {
+            gui = new GUI();
+            
+            // Cloud appearance
+            const cloudFolder = gui.addFolder('Cloud Appearance');
+            cloudFolder.add(params, 'cloudCoverage', 0.0, 1.0, 0.01).name('Cloud Density').onChange(value => {
+                skyMaterial.uniforms.uCloudCoverage.value = value;
+            });
+            cloudFolder.add(params, 'cloudHeight', 100.0, 1000.0, 10.0).name('Cloud Height').onChange(value => {
+                skyMaterial.uniforms.uCloudHeight.value = value;
+            });
+            cloudFolder.add(params, 'cloudThickness', 10.0, 100.0, 5.0).name('Cloud Thickness').onChange(value => {
+                skyMaterial.uniforms.uCloudThickness.value = value;
+            });
+            cloudFolder.add(params, 'cloudAbsorption', 0.5, 2.0, 0.01).name('Light Absorption').onChange(value => {
+                skyMaterial.uniforms.uCloudAbsorption.value = value;
+            });
+            cloudFolder.open();
+            
+            // Cloud movement
+            const movementFolder = gui.addFolder('Cloud Movement');
+            movementFolder.add(params, 'windSpeedX', 0.0, 20.0, 0.1).name('Wind Speed X').onChange(value => {
+                skyMaterial.uniforms.uWindSpeedX.value = value;
+            });
+            movementFolder.add(params, 'windSpeedZ', 0.0, 20.0, 0.1).name('Wind Speed Z').onChange(value => {
+                skyMaterial.uniforms.uWindSpeedZ.value = value;
+            });
+            movementFolder.add(params, 'maxCloudDistance', 1000.0, 20000.0, 500.0).name('Cloud View Distance').onChange(value => {
+                skyMaterial.uniforms.uMaxCloudDistance.value = value;
+            });
+            movementFolder.open();
+            
+            // Sun and lighting
+            const sunFolder = gui.addFolder('Sun & Lighting');
+            sunFolder.add(params, 'sunSpeed', 0.001, 0.1, 0.001).name('Sun Cycle Speed');
+            sunFolder.add(params, 'exposure', 0.1, 2.0, 0.1).name('Exposure').onChange(value => {
+                renderer.toneMappingExposure = value;
+            });
+            sunFolder.open();
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            if (skyMaterial) skyMaterial.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const deltaTime = clock.getDelta();
+            elapsedTime = clock.getElapsedTime();
+
+            // Update Sun Direction using the same formula as in Ocean_And_Sky_Rendering.js
+            sunAngle = (elapsedTime * params.sunSpeed) % (Math.PI + 0.2) - 0.11;
+            sunDirection.set(Math.cos(sunAngle), Math.sin(sunAngle), -Math.cos(sunAngle) * 2.0);
+            sunDirection.normalize();
+            
+            // Update shader uniforms
+            if (skyMaterial) {
+                skyMaterial.uniforms.uSunDirection.value.copy(sunDirection);
+                skyMaterial.uniforms.uTime.value = elapsedTime;
+            }
+            
+            // Update sun light direction
+            if (window.updateSunLight) {
+                window.updateSunLight(sunDirection);
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        init();
+        animate();
+    </script>
+</body>
+</html>
