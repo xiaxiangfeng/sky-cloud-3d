@@ -1,0 +1,32 @@
+# Node
+node_modules/
+*.log
+npm-debug.log*
+
+# Build
+/build/
+*.tgz
+
+# VSCode
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+
+# Misc
+*.bak
+*.tmp
+.idea/
+
+# Test
+coverage/
+
+# Mac
+__MACOSX/
+
+SkyCloudMesh.js

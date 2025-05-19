@@ -1,0 +1,38 @@
+{
+  "name": "sky-cloud-3d",
+  "version": "1.0.0",
+  "description": "Physically-based sky and volumetric cloud ShaderMaterial for Three.js.",
+  "main": "SkyCloudMesh.js",
+  "module": "SkyCloudMesh.js",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./SkyCloudMesh.js"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/sky-cloud-3d.git"
+  },
+  "keywords": [
+    "three.js",
+    "sky",
+    "clouds",
+    "shader",
+    "material",
+    "volumetric",
+    "atmosphere"
+  ],
+  "author": "Your Name",
+  "license": "SEE LICENSE IN LICENSE",
+  "peerDependencies": {
+    "three": ">=0.140.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^28.0.3",
+    "@rollup/plugin-node-resolve": "^16.0.1",
+    "@rollup/plugin-terser": "^0.4.4",
+    "rollup": "^2.79.2",
+    "rollup-plugin-terser": "^7.0.2"
+  }
+}
