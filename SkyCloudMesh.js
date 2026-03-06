@@ -23,6 +23,7 @@ import {
     If,
     Loop,
     abs,
+    acos,
     cameraPosition,
     clamp,
     dot,
@@ -46,7 +47,7 @@ import {
 } from 'three/tsl';
 
 const FALLBACK_NOISE_SIZE = 256;
-const FALLBACK_VOLUME_NOISE_SIZE = 64;
+const FALLBACK_VOLUME_NOISE_SIZE = 96;
 const FALLBACK_OCTAVES = 5;
 const FALLBACK_BASE_FREQUENCY = 4;
 const FALLBACK_PERSISTENCE = 0.55;
@@ -58,10 +59,15 @@ const LIGHT_STEPS = 5;
 
 const DEFAULT_PARAMS = {
     cloudAbsorption: 1.03,
-    cloudCoverage: 0.65,
+    cloudCoverage: 0.58,
     cloudHeight: 600.0,
     cloudThickness: 45.0,
+    hazeStrength: 0.12,
     maxCloudDistance: 10000.0,
+    mieCoefficient: 0.0022,
+    mieDirectionalG: 0.64,
+    rayleigh: 0.95,
+    turbidity: 1.35,
     windSpeedX: 5.0,
     windSpeedZ: 3.0,
 };
@@ -71,7 +77,12 @@ const PARAM_TO_NODE = {
     cloudCoverage: 'uCloudCoverage',
     cloudHeight: 'uCloudHeight',
     cloudThickness: 'uCloudThickness',
+    hazeStrength: 'uHazeStrength',
     maxCloudDistance: 'uMaxCloudDistance',
+    mieCoefficient: 'uMieCoefficient',
+    mieDirectionalG: 'uMieDirectionalG',
+    rayleigh: 'uRayleigh',
+    turbidity: 'uTurbidity',
     windSpeedX: 'uWindSpeedX',
     windSpeedZ: 'uWindSpeedZ',
 };
@@ -408,11 +419,16 @@ function createNodeSet(options = {}) {
         uCloudCoverage: uniform(normalizeParamValue('cloudCoverage', options.cloudCoverage ?? DEFAULT_PARAMS.cloudCoverage)),
         uCloudHeight: uniform(normalizeParamValue('cloudHeight', options.cloudHeight ?? DEFAULT_PARAMS.cloudHeight)),
         uCloudThickness: uniform(normalizeParamValue('cloudThickness', options.cloudThickness ?? DEFAULT_PARAMS.cloudThickness)),
+        uHazeStrength: uniform(normalizeParamValue('hazeStrength', options.hazeStrength ?? DEFAULT_PARAMS.hazeStrength)),
         uMaxCloudDistance: uniform(normalizeParamValue('maxCloudDistance', options.maxCloudDistance ?? DEFAULT_PARAMS.maxCloudDistance)),
+        uMieCoefficient: uniform(normalizeParamValue('mieCoefficient', options.mieCoefficient ?? DEFAULT_PARAMS.mieCoefficient)),
+        uMieDirectionalG: uniform(normalizeParamValue('mieDirectionalG', options.mieDirectionalG ?? DEFAULT_PARAMS.mieDirectionalG)),
         uNoiseMode: uniform(noiseMode),
+        uRayleigh: uniform(normalizeParamValue('rayleigh', options.rayleigh ?? DEFAULT_PARAMS.rayleigh)),
         uResolution: uniform(new Vector2(options.width ?? 1920, options.height ?? 1080)),
         uSunDirection: uniform((options.sunDirection ?? new Vector3(0.5, 0.5, -0.5)).clone().normalize()),
         uTime: uniform(options.time ?? 0.0),
+        uTurbidity: uniform(normalizeParamValue('turbidity', options.turbidity ?? DEFAULT_PARAMS.turbidity)),
         uWindSpeedX: uniform(normalizeParamValue('windSpeedX', options.windSpeedX ?? DEFAULT_PARAMS.windSpeedX)),
         uWindSpeedZ: uniform(normalizeParamValue('windSpeedZ', options.windSpeedZ ?? DEFAULT_PARAMS.windSpeedZ)),
     };
@@ -433,24 +449,157 @@ function getSkyCloudNodes(material) {
 }
 
 function buildColorNode(nodes) {
-    const getSkyColor = Fn(( [ rayDirImmutable ] ) => {
-        const rayDir = vec3(rayDirImmutable);
-        const sunAmount = max(0.0, dot(rayDir, nodes.uSunDirection));
-        const skyGradient = pow(max(0.0, rayDir.y), 0.5);
-        const sunHalo = pow(sunAmount, 48.0);
-        const sunDisc = smoothstep(0.99985, 0.99997, sunAmount);
+    const up = vec3(0.0, 1.0, 0.0);
+    const totalRayleigh = vec3(
+        5.804542996261093e-6,
+        1.3562911419845635e-5,
+        3.0265902468824876e-5,
+    );
+    const mieConst = vec3(
+        1.8399918514433978e14,
+        2.7798023919660528e14,
+        4.0790479543861094e14,
+    );
+    const sunDistance = float(400000.0);
+    const cutoffAngle = float(1.6110731556870734);
+    const steepness = float(1.5);
+    const sunEnergyFactor = float(850.0);
+    const rayleighZenithLength = float(8400.0);
+    const mieZenithLength = float(1250.0);
+    const sunAngularDiameterCos = float(0.9999566769464484);
+    const threeOverSixteenPi = float(0.05968310365946075);
+    const oneOverFourPi = float(0.07957747154594767);
+    const degreesPerRadian = float(57.29577951308232);
 
-        const skyColor = mix(
-            vec3(0.095, 0.19, 0.38),
-            vec3(0.82, 0.72, 0.56),
-            pow(sunAmount, 12.0),
+    const sunIntensity = Fn(( [ zenithAngleCosImmutable ] ) => {
+        const zenithAngleCos = clamp(zenithAngleCosImmutable, -1.0, 1.0).toVar();
+        const angle = acos(zenithAngleCos).toVar();
+        const attenuation = exp(
+            cutoffAngle.sub(angle).div(steepness).negate(),
         ).toVar();
 
-        skyColor.assign(mix(vec3(0.68, 0.73, 0.79), skyColor, skyGradient));
-        skyColor.addAssign(vec3(1.0, 0.82, 0.62).mul(sunHalo).mul(0.18));
-        skyColor.addAssign(vec3(1.0, 0.8, 0.58).mul(sunDisc).mul(1.4));
+        return max(0.0, float(1.0).sub(attenuation)).mul(sunEnergyFactor);
+    });
 
-        return skyColor;
+    const totalMie = Fn(() => {
+        const coefficient = nodes.uTurbidity.mul(0.2e-17).mul(0.434);
+        return mieConst.mul(coefficient);
+    });
+
+    const rayleighPhase = Fn(( [ cosThetaImmutable ] ) => {
+        return threeOverSixteenPi.mul(
+            float(1.0).add(pow(cosThetaImmutable, 2.0)),
+        );
+    });
+
+    const hgPhase = Fn(( [ cosThetaImmutable ] ) => {
+        const g = nodes.uMieDirectionalG;
+        const g2 = pow(g, 2.0).toVar();
+        const inverse = pow(
+            float(1.0).sub(g.mul(cosThetaImmutable).mul(2.0)).add(g2),
+            -1.5,
+        ).toVar();
+
+        return oneOverFourPi.mul(float(1.0).sub(g2)).mul(inverse);
+    });
+
+    const getSkyColor = Fn(( [ rayDirImmutable ] ) => {
+        const rayDir = vec3(rayDirImmutable);
+        const sunDirection = normalize(nodes.uSunDirection).toVar();
+        const sunPositionY = sunDirection.y.mul(sunDistance).toVar();
+        const sunFade = float(1.0).sub(
+            clamp(
+                float(1.0).sub(exp(sunPositionY.div(450000.0))),
+                0.0,
+                1.0,
+            ),
+        ).toVar();
+        const lowSunFactor = clamp(
+            float(1.0).sub(smoothstep(-0.04, 0.22, sunDirection.y)),
+            0.0,
+            1.0,
+        ).toVar();
+        const highSunFactor = smoothstep(0.04, 0.38, sunDirection.y).toVar();
+        const nearHorizonFactor = float(1.0).sub(smoothstep(0.015, 0.22, rayDir.y)).toVar();
+        const dayHazeFactor = nearHorizonFactor.mul(highSunFactor).mul(nodes.uHazeStrength).toVar();
+        const rayleighCoefficient = nodes.uRayleigh.sub(
+            float(1.0).sub(sunFade),
+        ).toVar();
+        const betaR = totalRayleigh.mul(rayleighCoefficient).toVar();
+        const betaM = totalMie().mul(nodes.uMieCoefficient).toVar();
+        const zenithAngleCos = max(0.0, dot(up, rayDir)).toVar();
+        const zenithAngle = acos(zenithAngleCos).toVar();
+        const inverse = float(1.0).div(
+            zenithAngleCos.add(
+                float(0.15).mul(
+                    pow(
+                        float(93.885).sub(zenithAngle.mul(degreesPerRadian)),
+                        -1.253,
+                    ),
+                ),
+            ),
+        ).toVar();
+        const sR = rayleighZenithLength.mul(inverse).toVar();
+        const sM = mieZenithLength.mul(inverse).toVar();
+        const Fex = exp(
+            betaR.mul(sR).add(betaM.mul(sM)).negate(),
+        ).toVar();
+        const cosTheta = dot(rayDir, sunDirection).toVar();
+        const rPhase = rayleighPhase(cosTheta.mul(0.5).add(0.5)).toVar();
+        const betaRTheta = betaR.mul(rPhase).toVar();
+        const mPhase = hgPhase(cosTheta).toVar();
+        const horizonMieDamping = mix(
+            float(1.0).sub(dayHazeFactor.mul(0.92)),
+            1.0,
+            smoothstep(0.09, 0.28, rayDir.y),
+        ).toVar();
+        const betaMTheta = betaM.mul(mPhase).mul(horizonMieDamping).toVar();
+        const sunE = sunIntensity(dot(sunDirection, up)).toVar();
+        const scatteringBase = betaRTheta.add(betaMTheta).div(betaR.add(betaM)).toVar();
+        const linBase = vec3(sunE).mul(scatteringBase).mul(vec3(1.0).sub(Fex)).toVar();
+        const Lin = pow(linBase, vec3(1.5)).toVar();
+        const sunsetMix = clamp(
+            pow(float(1.0).sub(dot(up, sunDirection)), 5.0),
+            0.0,
+            1.0,
+        ).toVar();
+        const horizonBlend = pow(
+            vec3(sunE).mul(scatteringBase).mul(Fex),
+            vec3(0.5),
+        ).toVar();
+        const L0 = vec3(0.1).mul(Fex).toVar();
+        const sunDisk = smoothstep(
+            sunAngularDiameterCos,
+            sunAngularDiameterCos.add(0.00002),
+            cosTheta,
+        ).toVar();
+        const sunDiskEnergy = mix(9000.0, 19000.0, float(1.0).sub(lowSunFactor.mul(0.65))).toVar();
+        const skyColor = Lin.mul(
+            mix(vec3(1.0), horizonBlend, sunsetMix.mul(0.72)),
+        ).toVar();
+        const skyLuminance = dot(skyColor, vec3(0.2126, 0.7152, 0.0722)).toVar();
+        const mutedSky = mix(skyColor, vec3(skyLuminance), lowSunFactor.mul(0.18)).toVar();
+        const groundBlend = smoothstep(-0.02, 0.22, rayDir.y).toVar();
+        const horizonWash = smoothstep(0.05, 0.2, rayDir.y).toVar();
+
+        L0.addAssign(Fex.mul(sunE.mul(sunDiskEnergy)).mul(sunDisk));
+        mutedSky.addAssign(L0);
+        mutedSky.assign(mutedSky.div(mutedSky.add(vec3(25.0))));
+        mutedSky.addAssign(vec3(0.00006, 0.00009, 0.00012));
+        mutedSky.assign(mix(vec3(0.026, 0.022, 0.02), mutedSky, groundBlend));
+        const horizonLuminance = dot(mutedSky, vec3(0.2126, 0.7152, 0.0722)).toVar();
+        const neutralWeight = mix(0.22, 0.0, highSunFactor);
+        const horizonNeutral = mix(vec3(horizonLuminance), vec3(0.62, 0.64, 0.66), neutralWeight).toVar();
+        const effectiveHorizonWash = mix(horizonWash, 1.0, highSunFactor);
+        mutedSky.assign(mix(horizonNeutral, mutedSky, effectiveHorizonWash));
+        const hazeSuppression = nearHorizonFactor
+            .mul(mix(0.04, 0.06, highSunFactor))
+            .mul(nodes.uHazeStrength.mul(1.6))
+            .toVar();
+        const clearerHorizon = vec3(horizonLuminance).mul(vec3(0.6, 0.64, 0.68)).toVar();
+        mutedSky.assign(mix(mutedSky, clearerHorizon, hazeSuppression));
+
+        return max(mutedSky, vec3(0.0));
     });
 
     const noiseTransform = mat3(
@@ -493,21 +642,22 @@ function buildColorNode(nodes) {
         const offset = vec3(offsetImmutable);
         const density = fbm(pos.mul(0.0212242).add(offset)).toVar();
         const detail = fbm(
-            pos.mul(0.048).add(offset.mul(1.73)).add(vec3(19.1, 0.0, 7.3)),
+            pos.mul(0.034).add(offset.mul(1.47)).add(vec3(19.1, 0.0, 7.3)),
         ).toVar();
+        const detailShaped = smoothstep(0.22, 0.78, detail).toVar();
         const coverageCutoff = float(1.0).sub(nodes.uCloudCoverage);
         const layerHeight = max(nodes.uCloudThickness, 0.0001);
         const height = pos.y.sub(nodes.uCloudHeight);
-        const heightWarp = detail.sub(0.5).mul(0.18).toVar();
+        const heightWarp = detailShaped.sub(0.5).mul(0.08).toVar();
         const height01 = clamp(height.div(layerHeight).add(heightWarp), 0.0, 1.0).toVar();
-        const bottomFade = smoothstep(0.0, 0.32, height01).toVar();
-        const topFade = float(1.0).sub(smoothstep(0.42, 1.0, height01)).toVar();
+        const bottomFade = smoothstep(0.03, 0.28, height01).toVar();
+        const topFade = float(1.0).sub(smoothstep(0.5, 0.92, height01)).toVar();
         const heightAttenuation = bottomFade.mul(topFade).toVar();
-        const detailLift = detail.sub(0.5).mul(0.08);
+        const detailLift = detailShaped.sub(0.5).mul(0.035);
 
         density.addAssign(detailLift);
         density.assign(smoothstep(coverageCutoff.sub(0.04), coverageCutoff.add(0.12), density));
-        density.mulAssign(smoothstep(0.02, 0.65, density));
+        density.mulAssign(smoothstep(0.05, 0.72, density));
         density.mulAssign(heightAttenuation);
 
         return clamp(density, 0.0, 1.0);
@@ -546,7 +696,8 @@ function buildColorNode(nodes) {
             const tExit = min(max(tBase, tTop), nodes.uMaxCloudDistance).toVar();
 
             If(tExit.greaterThan(tEntry), () => {
-                const distanceFade = float(1.0).sub(smoothstep(nodes.uMaxCloudDistance.mul(0.6), nodes.uMaxCloudDistance, tEntry));
+                const distanceFade = float(1.0).sub(smoothstep(nodes.uMaxCloudDistance.mul(0.52), nodes.uMaxCloudDistance, tEntry));
+                const distanceColorFade = mix(0.72, 1.0, distanceFade).toVar();
                 const marchDistance = tExit.sub(tEntry);
                 const angleFactor = float(1.0).sub(abs(rayDirection.y)).toVar();
                 const targetSteps = clamp(
@@ -587,20 +738,25 @@ function buildColorNode(nodes) {
 
                     const density = cloudDensity(pos, windOffset).toVar();
 
-                    If(density.greaterThan(0.005), () => {
+                    If(density.greaterThan(0.012), () => {
                         const stepTransmittance = exp(nodes.uCloudAbsorption.negate().mul(density).mul(marchStep)).toVar();
                         const directLight = cloudLight(pos, lightStep, windOffset);
                         const h = clamp(pos.y.sub(cloudBase).div(layerHeight), 0.0, 1.0).toVar();
                         const lightFactor = exp(h).div(1.95);
-                        const sunContribution = pow(max(0.0, dot(rayDirection, nodes.uSunDirection)), 2.5);
+                        const edgePresence = smoothstep(0.1, 0.42, density).toVar();
+                        const sunContribution = pow(max(0.0, dot(rayDirection, nodes.uSunDirection)), 3.2).mul(edgePresence);
                         const edgeColor = mix(
-                            vec3(0.82, 0.84, 0.88),
-                            vec3(1.0, 0.84, 0.62),
-                            clamp(sunContribution.mul(0.7).add(directLight.mul(0.2)), 0.0, 1.0),
+                            vec3(0.86, 0.86, 0.88),
+                            vec3(1.0, 0.86, 0.68),
+                            clamp(sunContribution.mul(0.42).add(directLight.mul(0.24)), 0.0, 1.0),
                         );
-                        const shadeMix = clamp(directLight.mul(lightFactor).add(sunContribution.mul(0.18)), 0.0, 1.0);
+                        const shadeMix = clamp(
+                            directLight.mul(lightFactor).add(sunContribution.mul(0.08)),
+                            0.0,
+                            1.0,
+                        ).mul(mix(0.78, 1.0, edgePresence));
                         const shadedColor = mix(
-                            vec3(0.34, 0.36, 0.4),
+                            vec3(0.39, 0.39, 0.41),
                             edgeColor,
                             shadeMix,
                         );
@@ -620,11 +776,11 @@ function buildColorNode(nodes) {
                 color.assign(
                     cloudColor.mul(
                         mix(
-                            vec3(0.4, 0.5, 0.6),
-                            vec3(0.9, 0.7, 0.5),
-                            pow(max(0.0, dot(rayDirection, nodes.uSunDirection)), 2.0).mul(0.5),
+                            vec3(0.78, 0.8, 0.82),
+                            vec3(0.92, 0.78, 0.62),
+                            pow(max(0.0, dot(rayDirection, nodes.uSunDirection)), 2.5).mul(0.28),
                         ),
-                    ).mul(distanceFade),
+                    ).mul(distanceColorFade),
                 );
                 alpha.assign(cloudAlpha.mul(distanceFade));
             });
@@ -637,10 +793,7 @@ function buildColorNode(nodes) {
         const rayDirection = normalize(positionWorld.sub(cameraPosition)).toVar();
         const skyColor = getSkyColor(rayDirection).toVar();
         const clouds = renderClouds(cameraPosition, rayDirection).toVar();
-        const finalColor = mix(skyColor, clouds.rgb, clouds.a).toVar();
-        const horizonFade = pow(float(1.0).sub(max(0.0, rayDirection.y)), 5.0);
-
-        finalColor.assign(mix(finalColor, vec3(0.65, 0.7, 0.75), horizonFade.mul(0.5)));
+        const finalColor = skyColor.mul(float(1.0).sub(clouds.a)).add(clouds.rgb).toVar();
 
         return vec4(finalColor, 1.0);
     })();

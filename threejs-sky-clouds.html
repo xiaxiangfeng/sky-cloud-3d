@@ -38,7 +38,7 @@
         import { SkyCloudMesh } from './dist/SkyCloudMesh.min.js';
 
         let scene, camera, renderer, controls, gui;
-        let skyMesh;
+        let skyMesh, gridHelper, groundPlane;
         let clock = new THREE.Clock();
         let elapsedTime = 0;
         
@@ -48,10 +48,15 @@
         
         // Configurable parameters
         const params = {
-            cloudCoverage: 0.65,
+            cloudCoverage: 0.58,
             cloudHeight: 600.0,
             cloudThickness: 45.0,
             cloudAbsorption: 1.030725,
+            hazeStrength: 0.12,
+            turbidity: 1.35,
+            rayleigh: 0.95,
+            mieCoefficient: 0.0022,
+            mieDirectionalG: 0.64,
             windSpeedX: 5.0,
             windSpeedZ: 3.0,
             sunSpeed: 0.035,
@@ -98,8 +103,20 @@
             // Grid Helper
             const gridSize = 2000;
             const gridDivisions = 40;
-            const gridHelper = new THREE.GridHelper(gridSize, gridDivisions, 0x888888, 0x444444);
+            gridHelper = new THREE.GridHelper(gridSize, gridDivisions, 0x888888, 0x444444);
             scene.add(gridHelper);
+
+            // Ground Plane
+            const groundSize = gridSize * 6;
+            const groundGeometry = new THREE.PlaneGeometry(groundSize, groundSize);
+            const groundMaterial = new THREE.MeshBasicMaterial({
+                color: 0xc7ccd1,
+                side: THREE.DoubleSide
+            });
+            groundPlane = new THREE.Mesh(groundGeometry, groundMaterial);
+            groundPlane.rotation.x = -Math.PI / 2;
+            groundPlane.position.y = -2;
+            scene.add(groundPlane);
             
             // SkyCloudMesh
             skyMesh = new SkyCloudMesh({
@@ -114,6 +131,16 @@
 
             // Handle window resize
             window.addEventListener('resize', onWindowResize, false);
+        }
+
+        function updateReferenceSurfaces() {
+            if (!camera) return;
+
+            const cloudTop = params.cloudHeight + params.cloudThickness;
+            const showReferenceSurfaces = camera.position.y < cloudTop - 10.0;
+
+            if (gridHelper) gridHelper.visible = showReferenceSurfaces;
+            if (groundPlane) groundPlane.visible = showReferenceSurfaces;
         }
         
         function setupGUI() {
@@ -147,6 +174,24 @@
                 skyMesh.setParameter('maxCloudDistance', value);
             });
             movementFolder.open();
+
+            const skyFolder = gui.addFolder('Physical Sky');
+            skyFolder.add(params, 'hazeStrength', 0.0, 0.5, 0.01).name('Haze Strength').onChange(value => {
+                skyMesh.setParameter('hazeStrength', value);
+            });
+            skyFolder.add(params, 'turbidity', 1.0, 20.0, 0.1).name('Turbidity').onChange(value => {
+                skyMesh.setParameter('turbidity', value);
+            });
+            skyFolder.add(params, 'rayleigh', 0.0, 6.0, 0.05).name('Rayleigh').onChange(value => {
+                skyMesh.setParameter('rayleigh', value);
+            });
+            skyFolder.add(params, 'mieCoefficient', 0.0, 0.05, 0.0005).name('Mie Coefficient').onChange(value => {
+                skyMesh.setParameter('mieCoefficient', value);
+            });
+            skyFolder.add(params, 'mieDirectionalG', 0.0, 0.999, 0.001).name('Mie Directional G').onChange(value => {
+                skyMesh.setParameter('mieDirectionalG', value);
+            });
+            skyFolder.open();
             
             // Sun and lighting
             const sunFolder = gui.addFolder('Sun & Lighting');
@@ -176,10 +221,10 @@
             if (skyMesh && skyMesh.updateCamera) skyMesh.updateCamera(camera);
             
             // 更新 SkyCloudMesh
+            controls.update();
             if (skyMesh && skyMesh.updateSun) skyMesh.updateSun(sunDirection);
             if (skyMesh && skyMesh.updateTime) skyMesh.updateTime(elapsedTime);
-            
-            controls.update();
+            updateReferenceSurfaces();
             renderer.render(scene, camera);
         }
 
