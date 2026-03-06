@@ -19,19 +19,22 @@
     </style>
 </head>
 <body>
-    <div id="info">Three.js Sky and Cloud Rendering</div>
+    <div id="info">Three.js r183 WebGPU Sky and Cloud Rendering</div>
     <script type="importmap">
     {
         "imports": {
-            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            "three": "https://unpkg.com/three@0.183.0/build/three.webgpu.js",
+            "three/webgpu": "https://unpkg.com/three@0.183.0/build/three.webgpu.js",
+            "three/tsl": "https://unpkg.com/three@0.183.0/build/three.tsl.js",
+            "three/addons/": "https://unpkg.com/three@0.183.0/examples/jsm/"
         }
     }
     </script>
     <script type="module">
-        import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
-        import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js';
-        import { GUI } from 'https://unpkg.com/three@0.160.0/examples/jsm/libs/lil-gui.module.min.js';
+        import * as THREE from 'three';
+        import WebGPU from 'three/addons/capabilities/WebGPU.js';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
         import { SkyCloudMesh } from './dist/SkyCloudMesh.min.js';
 
         let scene, camera, renderer, controls, gui;
@@ -57,6 +60,11 @@
         };
 
         async function init() {
+            if (!WebGPU.isAvailable()) {
+                document.body.appendChild(WebGPU.getErrorMessage());
+                throw new Error('WebGPU is not available in this browser.');
+            }
+
             // Scene
             scene = new THREE.Scene();
 
@@ -66,7 +74,8 @@
             camera.lookAt(0, 100, 0);
 
             // Renderer
-            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer = new THREE.WebGPURenderer({ antialias: true });
+            await renderer.init();
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.setPixelRatio(window.devicePixelRatio);
             renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -94,9 +103,10 @@
             
             // SkyCloudMesh
             skyMesh = new SkyCloudMesh({
-                ...params,
-                perlinTextureUrl: './perlin256.png'
+                ...params
             });
+            skyMesh.updateCamera(camera);
+            skyMesh.updateResolution(window.innerWidth, window.innerHeight);
             scene.add(skyMesh);
 
             // Add GUI controls
@@ -112,29 +122,29 @@
             // Cloud appearance
             const cloudFolder = gui.addFolder('Cloud Appearance');
             cloudFolder.add(params, 'cloudCoverage', 0.0, 1.0, 0.01).name('Cloud Density').onChange(value => {
-                skyMesh.material.uniforms.uCloudCoverage.value = value;
+                skyMesh.setParameter('cloudCoverage', value);
             });
             cloudFolder.add(params, 'cloudHeight', 100.0, 1000.0, 10.0).name('Cloud Height').onChange(value => {
-                skyMesh.material.uniforms.uCloudHeight.value = value;
+                skyMesh.setParameter('cloudHeight', value);
             });
             cloudFolder.add(params, 'cloudThickness', 10.0, 100.0, 5.0).name('Cloud Thickness').onChange(value => {
-                skyMesh.material.uniforms.uCloudThickness.value = value;
+                skyMesh.setParameter('cloudThickness', value);
             });
             cloudFolder.add(params, 'cloudAbsorption', 0.5, 2.0, 0.01).name('Light Absorption').onChange(value => {
-                skyMesh.material.uniforms.uCloudAbsorption.value = value;
+                skyMesh.setParameter('cloudAbsorption', value);
             });
             cloudFolder.open();
             
             // Cloud movement
             const movementFolder = gui.addFolder('Cloud Movement');
             movementFolder.add(params, 'windSpeedX', 0.0, 20.0, 0.1).name('Wind Speed X').onChange(value => {
-                skyMesh.material.uniforms.uWindSpeedX.value = value;
+                skyMesh.setParameter('windSpeedX', value);
             });
             movementFolder.add(params, 'windSpeedZ', 0.0, 20.0, 0.1).name('Wind Speed Z').onChange(value => {
-                skyMesh.material.uniforms.uWindSpeedZ.value = value;
+                skyMesh.setParameter('windSpeedZ', value);
             });
             movementFolder.add(params, 'maxCloudDistance', 1000.0, 20000.0, 500.0).name('Cloud View Distance').onChange(value => {
-                skyMesh.material.uniforms.uMaxCloudDistance.value = value;
+                skyMesh.setParameter('maxCloudDistance', value);
             });
             movementFolder.open();
             
@@ -151,18 +161,19 @@
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
-            if (skyMesh) skyMesh.material.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+            if (skyMesh && skyMesh.updateResolution) {
+                skyMesh.updateResolution(window.innerWidth, window.innerHeight);
+            }
         }
         
         function animate() {
-            requestAnimationFrame(animate);
-            const deltaTime = clock.getDelta();
             elapsedTime = clock.getElapsedTime();
 
             // Update Sun Direction
             sunAngle = (elapsedTime * params.sunSpeed) % (Math.PI + 0.2) - 0.11;
             sunDirection.set(Math.cos(sunAngle), Math.sin(sunAngle), -Math.cos(sunAngle) * 2.0);
             sunDirection.normalize();
+            if (skyMesh && skyMesh.updateCamera) skyMesh.updateCamera(camera);
             
             // 更新 SkyCloudMesh
             if (skyMesh && skyMesh.updateSun) skyMesh.updateSun(sunDirection);
@@ -172,8 +183,11 @@
             renderer.render(scene, camera);
         }
 
-        init();
-        animate();
+        init().then(() => {
+            renderer.setAnimationLoop(animate);
+        }).catch((error) => {
+            console.error(error);
+        });
     </script>
 </body>
 </html>

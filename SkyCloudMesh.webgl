@@ -1,0 +1,316 @@
+// SkyMaterial.js
+// Open source Three.js sky and cloud material library
+// Author: [Your Name]
+// License: MIT
+
+import * as THREE from 'three';
+
+/**
+ * Creates a physically-based sky and cloud ShaderMaterial for Three.js.
+ * @param {Object} [params] - Optional parameters to control sky and cloud appearance.
+ * @param {number} [params.cloudCoverage=0.65] - Cloud density (0.0-1.0).
+ * @param {number} [params.cloudHeight=600.0] - Height of the cloud layer.
+ * @param {number} [params.cloudThickness=45.0] - Thickness of the cloud layer.
+ * @param {number} [params.cloudAbsorption=1.03] - Light absorption in clouds.
+ * @param {number} [params.windSpeedX=5.0] - Wind speed in X direction.
+ * @param {number} [params.windSpeedZ=3.0] - Wind speed in Z direction.
+ * @param {number} [params.maxCloudDistance=10000.0] - Max view distance for clouds.
+ * @returns {THREE.ShaderMaterial}
+ */
+export function createSkyMaterial(params = {}) {
+    const uniforms = {
+        uTime: { value: 0.0 },
+        uSunDirection: { value: new THREE.Vector3(0.5, 0.5, -0.5).normalize() },
+        t_PerlinNoise: { value: null },
+        uResolution: { value: new THREE.Vector2(1920, 1080) },
+        uCloudCoverage: { value: params.cloudCoverage ?? 0.65 },
+        uCloudHeight: { value: params.cloudHeight ?? 600.0 },
+        uCloudThickness: { value: params.cloudThickness ?? 45.0 },
+        uCloudAbsorption: { value: params.cloudAbsorption ?? 1.03 },
+        uWindSpeedX: { value: params.windSpeedX ?? 5.0 },
+        uWindSpeedZ: { value: params.windSpeedZ ?? 3.0 },
+        uMaxCloudDistance: { value: params.maxCloudDistance ?? 10000.0 }
+    };
+
+    const vertexShader = `
+        varying vec3 vWorldPosition;
+        varying vec2 vUv;
+        void main() {
+            vUv = uv;
+            vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+            vWorldPosition = worldPosition.xyz;
+            gl_Position = projectionMatrix * viewMatrix * worldPosition;
+        }
+    `;
+
+    const fragmentShader = `
+        precision highp float;
+        precision highp int;
+        uniform float uTime;
+        uniform vec3 uSunDirection;
+        uniform sampler2D t_PerlinNoise;
+        uniform vec2 uResolution;
+        uniform float uCloudCoverage;
+        uniform float uCloudHeight;
+        uniform float uCloudThickness;
+        uniform float uCloudAbsorption;
+        uniform float uWindSpeedX;
+        uniform float uWindSpeedZ;
+        uniform float uMaxCloudDistance;
+        varying vec3 vWorldPosition;
+        varying vec2 vUv;
+        #define TWO_PI 6.28318530718
+        #define STEPS          22
+        #define LIGHT_STEPS    5
+        vec3 Get_Sky_Color(vec3 rayDir) {
+            float sunAmount = max(0.0, dot(rayDir, uSunDirection));
+            float skyGradient = pow(max(0.0, rayDir.y), 0.5);
+            vec3 skyColor = mix(
+                vec3(0.1, 0.2, 0.4),
+                vec3(0.8, 0.7, 0.5),
+                pow(sunAmount, 12.0)
+            );
+            vec3 horizonColor = vec3(0.7, 0.75, 0.8);
+            skyColor = mix(horizonColor, skyColor, skyGradient);
+            if (sunAmount > 0.999) {
+                skyColor += vec3(1.0, 0.7, 0.3) * pow(sunAmount, 1000.0) * 3.0;
+            }
+            return skyColor;
+        }
+        float noise3D(in vec3 p) {
+            vec2 uv = p.xz * 0.01;
+            return texture(t_PerlinNoise, uv).x;
+        }
+        const mat3 m = 1.21 * mat3(0.00, 0.80, 0.60,
+                                  -0.80, 0.36, -0.48,
+                                  -0.60, -0.48, 0.64);
+        float fbm(vec3 p) {
+            float t;
+            float mult = 2.76434;
+            t  = 0.51749673 * noise3D(p); p = m * p * mult;
+            t += 0.25584929 * noise3D(p); p = m * p * mult;
+            t += 0.12527603 * noise3D(p); p = m * p * mult;
+            t += 0.06255931 * noise3D(p);
+            return t;
+        }
+        float cloud_density(vec3 pos, vec3 offset, float h) {
+            vec3 p = pos * 0.0212242 + offset;
+            float dens = fbm(p);
+            float cov = 1.0 - uCloudCoverage;
+            dens *= smoothstep(cov, cov + 0.05, dens);
+            float height = pos.y - uCloudHeight;
+            float heightAttenuation = 1.0 - clamp(height / uCloudThickness, 0.0, 1.0);
+            heightAttenuation = heightAttenuation * heightAttenuation;
+            dens *= heightAttenuation;
+            return clamp(dens, 0.0, 1.0);
+        }
+        float cloud_light(vec3 pos, vec3 dir_step, vec3 offset, float cov) {
+            float T = 1.0;
+            for (int i = 0; i < LIGHT_STEPS; i++) {
+                float dens = cloud_density(pos, offset, 0.0);
+                float T_i = exp(-uCloudAbsorption * dens);
+                T *= T_i;
+                pos += dir_step;
+            }
+            return T;
+        }
+        vec4 render_clouds(vec3 rayOrigin, vec3 rayDirection) {
+            float t = (uCloudHeight - rayOrigin.y) / rayDirection.y;
+            if (t < 0.0) return vec4(0.0);
+            if (t > uMaxCloudDistance) return vec4(0.0);
+            float distanceFade = 1.0 - smoothstep(uMaxCloudDistance * 0.6, uMaxCloudDistance, t);
+            vec3 startPos = rayOrigin + rayDirection * t;
+            vec3 windOffset = vec3(uTime * -uWindSpeedX, 0.0, uTime * -uWindSpeedZ);
+            vec3 pos = startPos;
+            float march_step = uCloudThickness / float(STEPS);
+            vec3 dir_step = rayDirection * march_step;
+            vec3 light_step = uSunDirection * 5.0;
+            float covAmount = (sin(mod(uTime * 0.02, TWO_PI))) * 0.1 + 0.5;
+            float coverage = mix(0.4, 0.6, clamp(covAmount, 0.0, 1.0));
+            float T = 1.0;
+            vec3 C = vec3(0);
+            float alpha = 0.0;
+            for (int i = 0; i < STEPS; i++) {
+                if (pos.y < uCloudHeight || pos.y > uCloudHeight + uCloudThickness) {
+                    pos += dir_step;
+                    continue;
+                }
+                float h = float(i) / float(STEPS);
+                float dens = cloud_density(pos, windOffset, h);
+                if (dens > 0.01) {
+                    float T_i = exp(-uCloudAbsorption * dens * march_step);
+                    T *= T_i;
+                    float cloudLight = cloud_light(pos, light_step, windOffset, coverage);
+                    float lightFactor = (exp(h) / 1.75);
+                    float sunContribution = pow(max(0.0, dot(rayDirection, uSunDirection)), 2.0);
+                    vec3 edgeColor = mix(vec3(1.0), vec3(1.0, 0.8, 0.5), sunContribution);
+                    vec3 cloudColor = mix(
+                        vec3(0.15, 0.15, 0.2),
+                        edgeColor,
+                        cloudLight * lightFactor
+                    );
+                    C += T * cloudColor * dens * march_step * 1.5;
+                    alpha += (1.0 - T_i) * (1.0 - alpha);
+                }
+                pos += dir_step;
+                if (T < 0.01) break;
+            }
+            vec3 sunColor = vec3(0.9, 0.7, 0.5);
+            vec3 skyColor = vec3(0.4, 0.5, 0.6);
+            C = C * mix(skyColor, sunColor, 0.5 * pow(max(0.0, dot(rayDirection, uSunDirection)), 2.0));
+            alpha *= distanceFade;
+            C *= distanceFade;
+            return vec4(C, alpha);
+        }
+        void main() {
+            vec3 rayDirection = normalize(vWorldPosition - cameraPosition);
+            vec3 skyColor = Get_Sky_Color(rayDirection);
+            vec4 clouds = vec4(0.0);
+            if (rayDirection.y > 0.0) {
+                clouds = render_clouds(cameraPosition, rayDirection);
+            }
+            vec3 finalColor = mix(skyColor, clouds.rgb, clouds.a);
+            float t = pow(1.0 - max(0.0, rayDirection.y), 5.0);
+            finalColor = mix(finalColor, vec3(0.65, 0.7, 0.75), 0.5 * t);
+            finalColor = finalColor / (finalColor + vec3(1.0));
+            gl_FragColor = vec4(finalColor, 1.0);
+        }
+    `;
+
+    const material = new THREE.ShaderMaterial({
+        vertexShader,
+        fragmentShader,
+        uniforms,
+        side: THREE.BackSide,
+    });
+
+    // Provide a placeholder texture
+    const placeholderData = new Uint8Array([128, 128, 128, 255]);
+    const placeholderTexture = new THREE.DataTexture(placeholderData, 1, 1, THREE.RGBAFormat);
+    placeholderTexture.needsUpdate = true;
+    material.uniforms.t_PerlinNoise.value = placeholderTexture;
+
+    return material;
+}
+
+/**
+ * Utility to set the Perlin noise texture for the sky material.
+ * @param {THREE.ShaderMaterial} material - The sky material.
+ * @param {THREE.Texture} texture - The Perlin noise texture.
+ */
+export function setPerlinNoiseTexture(material, texture) {
+    if (material && material.uniforms && material.uniforms.t_PerlinNoise) {
+        material.uniforms.t_PerlinNoise.value = texture;
+        material.needsUpdate = true;
+    }
+}
+
+/**
+ * Creates a sky material and loads the Perlin noise texture automatically.
+ * @param {Object} params - Sky and cloud parameters, plus texture options.
+ * @param {string|undefined} params.perlinTextureUrl - URL of the Perlin noise texture. If not provided, fallback noise will be used.
+ * @returns {Promise<THREE.ShaderMaterial>} Resolves to a ready-to-use sky material.
+ */
+export async function createSkyMaterialWithTexture(params = {}) {
+    const material = createSkyMaterial(params);
+    let texture = null;
+    if (params.perlinTextureUrl) {
+        try {
+            texture = await new Promise((resolve, reject) => {
+                const loader = new THREE.TextureLoader();
+                loader.load(
+                    params.perlinTextureUrl,
+                    (tex) => {
+                        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+                        tex.flipY = false;
+                        tex.minFilter = THREE.LinearFilter;
+                        tex.magFilter = THREE.LinearFilter;
+                        tex.generateMipmaps = false;
+                        resolve(tex);
+                    },
+                    undefined,
+                    (err) => reject(err)
+                );
+            });
+        } catch (e) {
+            // Fallback to random noise
+            texture = createFallbackPerlinTexture();
+        }
+    } else {
+        texture = createFallbackPerlinTexture();
+    }
+    setPerlinNoiseTexture(material, texture);
+    return material;
+}
+
+/**
+ * Creates a fallback Perlin noise texture (random noise).
+ * @returns {THREE.DataTexture}
+ */
+function createFallbackPerlinTexture() {
+    const fallbackSize = 256;
+    const data = new Uint8Array(fallbackSize * fallbackSize * 4);
+    for (let i = 0; i < fallbackSize * fallbackSize * 4; i += 4) {
+        const val = Math.random() * 255;
+        data[i] = val;
+        data[i+1] = val;
+        data[i+2] = val;
+        data[i+3] = 255;
+    }
+    const fallbackTex = new THREE.DataTexture(
+        data, fallbackSize, fallbackSize, THREE.RGBAFormat
+    );
+    fallbackTex.needsUpdate = true;
+    return fallbackTex;
+}
+
+/**
+ * SkyCloudMesh: A ready-to-use sky and cloud dome mesh for Three.js.
+ * Usage: scene.add(new SkyCloudMesh({ ...params, perlinTextureUrl: '...' }))
+ */
+export class SkyCloudMesh extends THREE.Mesh {
+    /**
+     * @param {Object} params - Sky/cloud params, plus geometry and texture options.
+     * @param {number} [params.radius=20000] - Dome radius.
+     * @param {number} [params.widthSegments=64]
+     * @param {number} [params.heightSegments=32]
+     * @param {string} [params.perlinTextureUrl] - Perlin noise texture URL.
+     */
+    constructor(params = {}) {
+        const {
+            radius = 20000,
+            widthSegments = 64,
+            heightSegments = 32,
+            ...skyParams
+        } = params;
+        // Geometry
+        const geometry = new THREE.SphereGeometry(radius, widthSegments, heightSegments);
+        // Material (async texture loading)
+        const material = new THREE.ShaderMaterial(); // Placeholder, will be replaced
+        super(geometry, material);
+        this.isSkyCloudMesh = true;
+        // Async material setup
+        createSkyMaterialWithTexture(skyParams).then(mat => {
+            this.material.dispose();
+            this.material = mat;
+        });
+    }
+    /**
+     * 更新太阳方向
+     * @param {THREE.Vector3} sunDirection
+     */
+    updateSun(sunDirection) {
+        if (this.material && this.material.uniforms && this.material.uniforms.uSunDirection) {
+            this.material.uniforms.uSunDirection.value.copy(sunDirection);
+        }
+    }
+    /**
+     * 更新时间
+     * @param {number} elapsedTime
+     */
+    updateTime(elapsedTime) {
+        if (this.material && this.material.uniforms && this.material.uniforms.uTime) {
+            this.material.uniforms.uTime.value = elapsedTime;
+        }
+    }
+}

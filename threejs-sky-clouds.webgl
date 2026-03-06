@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Three.js Sky and Clouds</title>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, user-scalable=no, initial-scale=1"
+    />
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+      }
+      canvas {
+        display: block;
+      }
+      #info {
+        position: fixed;
+        top: 10px;
+        width: 100%;
+        text-align: center;
+        color: white;
+        font-family: Arial, sans-serif;
+        text-shadow: 1px 1px 2px black;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="info">Three.js Sky and Cloud Rendering</div>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+    <script type="module">
+      import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+      import { OrbitControls } from "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js";
+      import { GUI } from "https://unpkg.com/three@0.160.0/examples/jsm/libs/lil-gui.module.min.js";
+      import { SkyCloudMesh } from "./dist/SkyCloudMesh.min.js";
+
+      let scene, camera, renderer, controls, gui;
+      let skyMesh;
+      let clock = new THREE.Clock();
+      let elapsedTime = 0;
+
+      // For sun animation
+      let sunAngle = 0;
+      let sunDirection = new THREE.Vector3();
+
+      // Configurable parameters
+      const params = {
+        cloudCoverage: 0.65,
+        cloudHeight: 600.0,
+        cloudThickness: 45.0,
+        cloudAbsorption: 1.030725,
+        windSpeedX: 5.0,
+        windSpeedZ: 3.0,
+        sunSpeed: 0.035,
+        exposure: 0.7,
+        maxCloudDistance: 10000.0,
+      };
+
+      async function init() {
+        // Scene
+        scene = new THREE.Scene();
+
+        // Camera
+        camera = new THREE.PerspectiveCamera(
+          60,
+          window.innerWidth / window.innerHeight,
+          0.1,
+          30000
+        );
+        camera.position.set(0, 100, 400);
+        camera.lookAt(0, 100, 0);
+
+        // Renderer
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 0.7;
+        renderer.outputColorSpace = THREE.SRGBColorSpace;
+        document.body.appendChild(renderer.domElement);
+
+        // Controls
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.screenSpacePanning = false;
+        controls.minDistance = 10;
+        controls.maxDistance = 2000;
+        controls.maxPolarAngle = Math.PI * 0.48; // Limit to look mostly upward
+        controls.minPolarAngle = 0.1; // Prevent looking completely down
+        controls.autoRotate = false;
+        controls.autoRotateSpeed = 0.5;
+
+        // Grid Helper
+        const gridSize = 2000;
+        const gridDivisions = 40;
+        const gridHelper = new THREE.GridHelper(
+          gridSize,
+          gridDivisions,
+          0x888888,
+          0x444444
+        );
+        scene.add(gridHelper);
+
+        // SkyCloudMesh
+        skyMesh = new SkyCloudMesh({
+          ...params,
+          perlinTextureUrl: "./perlin256.png",
+        });
+        scene.add(skyMesh);
+
+        // Add GUI controls
+        setupGUI();
+
+        // Handle window resize
+        window.addEventListener("resize", onWindowResize, false);
+      }
+
+      function setupGUI() {
+        gui = new GUI();
+
+        // Cloud appearance
+        const cloudFolder = gui.addFolder("Cloud Appearance");
+        cloudFolder
+          .add(params, "cloudCoverage", 0.0, 1.0, 0.01)
+          .name("Cloud Density")
+          .onChange((value) => {
+            skyMesh.material.uniforms.uCloudCoverage.value = value;
+          });
+        cloudFolder
+          .add(params, "cloudHeight", 100.0, 1000.0, 10.0)
+          .name("Cloud Height")
+          .onChange((value) => {
+            skyMesh.material.uniforms.uCloudHeight.value = value;
+          });
+        cloudFolder
+          .add(params, "cloudThickness", 10.0, 100.0, 5.0)
+          .name("Cloud Thickness")
+          .onChange((value) => {
+            skyMesh.material.uniforms.uCloudThickness.value = value;
+          });
+        cloudFolder
+          .add(params, "cloudAbsorption", 0.5, 2.0, 0.01)
+          .name("Light Absorption")
+          .onChange((value) => {
+            skyMesh.material.uniforms.uCloudAbsorption.value = value;
+          });
+        cloudFolder.open();
+
+        // Cloud movement
+        const movementFolder = gui.addFolder("Cloud Movement");
+        movementFolder
+          .add(params, "windSpeedX", 0.0, 20.0, 0.1)
+          .name("Wind Speed X")
+          .onChange((value) => {
+            skyMesh.material.uniforms.uWindSpeedX.value = value;
+          });
+        movementFolder
+          .add(params, "windSpeedZ", 0.0, 20.0, 0.1)
+          .name("Wind Speed Z")
+          .onChange((value) => {
+            skyMesh.material.uniforms.uWindSpeedZ.value = value;
+          });
+        movementFolder
+          .add(params, "maxCloudDistance", 1000.0, 20000.0, 500.0)
+          .name("Cloud View Distance")
+          .onChange((value) => {
+            skyMesh.material.uniforms.uMaxCloudDistance.value = value;
+          });
+        movementFolder.open();
+
+        // Sun and lighting
+        const sunFolder = gui.addFolder("Sun & Lighting");
+        sunFolder
+          .add(params, "sunSpeed", 0.001, 0.1, 0.001)
+          .name("Sun Cycle Speed");
+        sunFolder
+          .add(params, "exposure", 0.1, 2.0, 0.1)
+          .name("Exposure")
+          .onChange((value) => {
+            renderer.toneMappingExposure = value;
+          });
+        sunFolder.open();
+      }
+
+      function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        if (skyMesh)
+          skyMesh.material.uniforms.uResolution.value.set(
+            window.innerWidth,
+            window.innerHeight
+          );
+      }
+
+      function animate() {
+        requestAnimationFrame(animate);
+        const deltaTime = clock.getDelta();
+        elapsedTime = clock.getElapsedTime();
+
+        // Update Sun Direction
+        sunAngle = ((elapsedTime * params.sunSpeed) % (Math.PI + 0.2)) - 0.11;
+        sunDirection.set(
+          Math.cos(sunAngle),
+          Math.sin(sunAngle),
+          -Math.cos(sunAngle) * 2.0
+        );
+        sunDirection.normalize();
+
+        // 更新 SkyCloudMesh
+        if (skyMesh && skyMesh.updateSun) skyMesh.updateSun(sunDirection);
+        if (skyMesh && skyMesh.updateTime) skyMesh.updateTime(elapsedTime);
+
+        controls.update();
+        renderer.render(scene, camera);
+      }
+
+      init();
+      animate();
+    </script>
+  </body>
+</html>

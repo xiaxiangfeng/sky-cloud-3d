@@ -1,7 +1,7 @@
 {
   "name": "sky-cloud-3d",
   "version": "1.0.0",
-  "description": "Physically-based sky and volumetric cloud ShaderMaterial for Three.js.",
+  "description": "WebGPU-compatible stylized sky and cloud dome for Three.js.",
   "main": "SkyCloudMesh.js",
   "module": "SkyCloudMesh.js",
   "type": "module",
@@ -18,15 +18,15 @@
     "three.js",
     "sky",
     "clouds",
-    "shader",
+    "webgpu",
     "material",
-    "volumetric",
+    "sky-dome",
     "atmosphere"
   ],
   "author": "Your Name",
   "license": "SEE LICENSE IN LICENSE",
   "peerDependencies": {
-    "three": ">=0.140.0"
+    "three": "^0.183.0"
   },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^28.0.3",

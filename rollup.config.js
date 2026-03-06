@@ -13,5 +13,5 @@ export default {
     commonjs(),
     terser()
   ],
-  external: ['three']
+  external: ['three', 'three/webgpu', 'three/tsl']
 };
